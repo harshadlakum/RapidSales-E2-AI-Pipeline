@@ -39,6 +39,3 @@ python voice_script_cache.py test
 ```
 
 ---
-
-Submitted by: _(your name)_
-Date: _(submission date)_
