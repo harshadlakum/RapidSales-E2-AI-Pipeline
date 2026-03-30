@@ -1,0 +1,112 @@
+Task E-2 - AI Pipeline Architecture & Cost Optimisation
+RapidSales.ai - revised submission in plain engineering style
+
+Goal:
+Reduce LLM cost, lower voice latency, and make failures visible before clients complain. The main change is to stop using the same expensive model for every step and treat voice generation as a cacheable problem.
+
+1. Revised architecture
+I would split the pipeline into three channel-specific workers instead of one generic "call GPT-4o for everything" path.
+
+- Day 1 WhatsApp generation runs through an async worker. It pulls the lead, builds a short prompt, generates the message, and sends it through the messaging provider.
+- Day 2 email generation also runs async. The worker checks a simple lead-priority rule before choosing the model.
+- Day 3 voice is handled separately. This path checks the voice-script cache first. If the cache misses, it generates the base script with the higher-quality model, stores it, then personalises the final script for the specific lead.
+- Every worker writes logs, metrics, cost counters, and provider response status to a shared observability layer.
+
+Diagram names:
+1) Revised AI outreach pipeline
+2) Voice script cache flow
+
+2. Model selection by channel
+WhatsApp - GPT-4o-mini
+This is the easiest place to save money. The message is short, low-risk, and usually follows a narrow pattern. A smaller model is good enough here.
+
+Email - GPT-4o-mini by default, GPT-4o only for priority leads
+Most outreach emails do not justify premium-model cost. I would reserve GPT-4o for a smaller priority segment such as high-value accounts, strong intent signals, or strategic customers.
+
+Voice script generation - GPT-4o on cache miss
+Voice is the most quality-sensitive step because poor phrasing is heard immediately on a live call. I would keep the stronger model here, but only when needed. The cost reduction comes from caching repeated industry and product combinations, not from downgrading quality too aggressively.
+
+3. Caching strategy
+The bonus cache should store the base voice script using a key built from industry + product_category. Example key: healthcare__ehr or real_estate__crm.
+
+- Store the generic base script, not the final lead-specific script.
+- Use a TTL such as 24 hours.
+- Invalidate the key when the client changes product positioning, pricing, or core call framing.
+- Warm the cache for the most common industry and product pairs during low-traffic hours.
+
+4. Async versus sync decisions
+WhatsApp and email should be async because they are campaign operations, not real-time conversations.
+Voice should stay sync at request time, but only after a cache check, because the call needs a script immediately.
+
+5. Fallback handling
+- Retry failed LLM calls with exponential backoff.
+- If voice still fails, return a safe fallback template.
+- If Redis is unavailable, skip the cache and call the LLM directly.
+- If both cache and LLM fail in voice, do not place a broken call. Mark the lead for retry and raise an alert.
+- For WhatsApp and email, failed jobs should move to a retry queue and then to a dead-letter queue if repeated failures continue.
+
+6. Cost estimate using current public GPT-4o and GPT-4o-mini pricing
+I am using simple assumptions because the prompt does not give real production token logs.
+
+Assumptions:
+- 200 clients x around 1,000 leads each = 200,000 leads
+- Voice reaches roughly 40% of leads after no response on earlier steps
+- Estimated token usage per message: WhatsApp 180 input / 120 output, email 300 input / 200 output, voice script 480 input / 320 output
+- Current public pricing used here: GPT-4o at $2.50 input and $10.00 output per 1M tokens; GPT-4o-mini at $0.15 input and $0.60 output per 1M tokens
+
+Estimated monthly spend under the current all-GPT-4o setup is about $1,232.
+Estimated monthly spend after the redesign is about $244.
+That is roughly an 80% reduction under these assumptions.
+
+7. Observability setup
+What I would log at each stage:
+- lead_id, client_id, channel, model used, prompt version, attempt number
+- request start time, end time, latency, provider status code, and error reason when present
+- input tokens, output tokens, estimated cost, cache_hit true or false, and fallback_used true or false
+- final delivery result: sent, failed, skipped, retried, or dead-lettered
+
+Alert conditions:
+- LLM failure rate above threshold for 5 minutes
+- Voice p95 latency above target
+- Cache hit rate drops sharply below baseline
+- Provider send failure spike
+- Daily AI spend significantly above forecast
+
+Five-metric dashboard:
+- successful sends by channel
+- LLM error rate by channel
+- voice script p95 latency
+- voice cache hit rate
+- AI spend today versus expected spend
+
+8. What the bonus voice cache code does
+The bonus code is not mandatory for the main task, but it is a useful extra. Its job is to avoid regenerating the same voice script again and again.
+
+Input:
+industry, product_category, lead_name, lead_company, client_company
+
+Process:
+- build a normalized cache key from industry and product_category
+- check whether a base script already exists in Redis
+- if found, personalise it with the lead details and return it quickly
+- if not found, call the LLM, save the base script in Redis with a TTL, then personalise and return it
+- if the LLM fails, use a safe fallback template
+
+Example input:
+industry = "real_estate"
+product_category = "crm"
+lead_name = "John"
+lead_company = "Acme Realty"
+client_company = "SalesFlow"
+
+Example output:
+script: "Hi John, this is calling on behalf of SalesFlow..."
+metrics: {cache_hit: true/false, llm_called: true/false, fallback_used: true/false, latency_ms: ...}
+
+How to test:
+python voice_script_cache.py test
+
+That test checks cache miss, cache hit, fallback behaviour, invalidation, and metrics tracking.
+
+9. Final note
+Name and date fields were removed because the task does not require them. They are optional for presentation only.
